@@ -192,6 +192,49 @@ processes can share the same opened database workers.
 
 _Note_: The `idalib` feature was contributed by [Willi Ballenthin](https://github.com/williballenthin).
 
+## Multiple IDA Instances
+
+When you use the GUI plugin, `ida-pro-mcp` acts as a single front door: it is one MCP endpoint that forwards every request to whichever IDA instance is currently selected. Each IDA GUI instance running the plugin starts its own HTTP server and auto-registers itself, so the proxy can discover them and route between them. You only configure one MCP server in your client, no matter how many databases you have open.
+
+```
+                 ┌──────────────────────────────────────┐
+   MCP client    │  ida-pro-mcp  (proxy / single front   │   ← one external endpoint
+  (Claude/etc.)  │  door: stdio OR one HTTP port)        │     (stdio, or e.g. :8744)
+   ───────────►  │  tools: list_instances,               │
+                 │  select_instance, open_file           │
+                 └───────────┬──────────────────────────-┘
+                             │ forwards to the *selected* instance over HTTP
+                ┌────────────┼────────────────┐
+                ▼            ▼                 ▼
+        IDA #1 :13337   IDA #2 :13338    IDA #3 :13339      ← each IDA plugin runs its own
+        (binary A)      (binary B)       (binary C)           HTTP server and registers a
+                                                              file in ~/.idapro/mcp/instances/
+```
+
+Instances register themselves under `~/.idapro/mcp/instances/` (on Windows: `%APPDATA%\Hex-Rays\IDA Pro\mcp\instances`). Typical localhost flow:
+
+1. Install the plugin once with `ida-pro-mcp --install`.
+2. Open binary A in IDA. The plugin autostarts an HTTP server on `13337` and registers itself.
+3. Open binary B in a second IDA. Port `13337` is taken, so it auto-picks `13338` and registers.
+4. Your MCP client launches `ida-pro-mcp` (stdio). That process is the proxy and auto-discovers the running instances.
+
+Three tools control routing:
+
+- `list_instances()`: lists discovered instances with their `binary`, `port`, `reachable` status, and which one is `active` (currently handling your calls).
+- `select_instance(port, host="127.0.0.1")`: routes all subsequent tool calls to that instance. Call with `port=0` to reset to the default target.
+- `open_file(file_path, switch=True, autonomous=False, new_database=False, timeout=30)`: launches a new IDA process for a binary and, when `switch=True`, automatically routes subsequent calls to it once it registers.
+
+Routing is per MCP session, so multiple clients connected to the same proxy each keep their own selected instance without clobbering one another.
+
+```python
+list_instances()
+select_instance(port=13338)   # route everything to binary B
+decompile("main")             # runs against binary B
+select_instance(port=0)       # reset to the default instance
+```
+
+> **Note**: the GUI plugin is slated for deprecation (see [Installation (GUI)](#installation-gui)). For headless or batch multi-database work — the recommended path — use `idalib-mcp`, which has its own session model described in [Headless idalib Session Model](#headless-idalib-session-model) below.
+
 ## Headless idalib Session Model
 
 `idalib-mcp` is a supervisor that keeps each open database in its own idalib worker process. Starting without an `input_path` is supported; use `idalib_open(input_path, ...)` to open databases dynamically and `idalib_close(session_id)` to close them. This allows one headless MCP server to work with arbitrary files over its lifetime.
